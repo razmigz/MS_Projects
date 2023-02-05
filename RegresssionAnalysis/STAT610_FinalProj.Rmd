@@ -1,0 +1,306 @@
+---
+title: "STAT610 Final Project"
+author: "Razmig Zeitounian"
+date: "10/22/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We have a dataset with many biostatistical variables. We will create a linear model to be used for inference and estimation of one of the variables, ``total_lung_capacity``. We must start by investigating the relationship between our given variables with ``total_lung_capacity``. Since ``sid`` and ``visit_date`` will not help with our model, we will drop them from our dataset before conducting any statistical analysis. Some questions we will be addressing are i) what is the most significant variable when used to estimate ``total_lung_capacity``, ii) what confidence intervals can we create using our models (simulataneous inference), iii) addressing predictions for ``total_lung_capacity``, iv) seeing how much the addition of a variable can help our model (via coefficient of partial determination, F-test comparing a full and reduced model and possibly more). More questions may be added as we familiarize ourselves more with the data.
+
+# Setup 
+
+We start by loading in our data and required packages. We change some variables' data types since R is not reading things as factors when some variables need to.
+
+```{r, message=FALSE}
+library(readxl)
+library(tidyverse)
+library(GGally)
+library(car)
+library(multcomp)
+library(corrplot)
+library(leaps)
+library(caret)
+library(ggpubr)
+
+df <- read_excel("C:/Users/razmi/OneDrive/Desktop/STAT610 - Regression/copd_data.xlsx")
+# view data and types
+glimpse(df)
+
+# convert variables to factors
+df$gender <- as.factor(df$gender)
+df$race <- as.factor(df$race)
+df$asthma <- as.factor(df$asthma)
+df$bronchitis_attack <- as.factor(df$bronchitis_attack)
+df$pneumonia <- as.factor(df$pneumonia)
+df$chronic_bronchitis <-as.factor(df$chronic_bronchitis) 
+df$emphysema <- as.factor(df$emphysema)
+df$copd <- as.factor(df$copd)
+df$sleep_apnea <- as.factor(df$sleep_apnea)
+df$smoking_status <- as.factor(df$smoking_status)
+
+head(df)
+
+anyNA(df)
+# no NAs, but still missing some data
+```
+
+```{r}
+# change breaks: https://stackoverflow.com/questions/14200027/how-to-adjust-binwidth-in-ggplot2
+breaks <- pretty(range(df$total_lung_capacity), n = nclass.FD(df$total_lung_capacity), min.n = 1)
+bwidth <- breaks[2]-breaks[1]
+
+# plot response 
+tlc_hist <- ggplot(df, aes(total_lung_capacity)) +
+  geom_histogram(binwidth=bwidth, color = "seagreen", fill = "indianred") +
+  labs(title = "Counts for Total Lung Capacity", x = "Total Lung Capacity", y = "Count",
+       subtitle = "Original Data") 
+
+# put plots side by side
+# https://www.datanovia.com/en/lessons/combine-multiple-ggplots-into-a-figure/
+
+df3 <- df %>% 
+  dplyr::select(-sid, -visit_date) %>% 
+  filter(total_lung_capacity > 0)
+
+tlc_hist_no_na <- ggplot(df3, aes(total_lung_capacity)) +
+  geom_histogram(binwidth=bwidth, color = "seagreen", fill = "indianred") +
+  labs(title = "Counts for Total Lung Capacity", x = "Total Lung Capacity", y = "Count",
+       subtitle = "Missing TLC Values Removed") 
+  
+fig1 <- ggarrange(tlc_hist, tlc_hist_no_na,
+                  #labels = "No Missing Values Removed", "Missing Values Removed",
+                  nrow = 1, ncol = 2)
+
+library(moments)
+skewness(df3$total_lung_capacity)
+```
+
+
+```{r, message = F, fig.width=20}
+# reminder: check for interaction effects
+df2 <- df %>% 
+  dplyr::select(-sid, -visit_date)
+#ggpairs(df2)
+
+# df %>% 
+#   dplyr::select(emphysema, bronchitis_attack, chronic_bronchitis) %>% 
+#   count(emphysema, bronchitis_attack, chronic_bronchitis)
+
+table(df$emphysema)
+table(df$bronchitis_attack)
+table(df$chronic_bronchitis)
+
+vars_to_plot <- data.frame("sysBP" = df$sysBP,
+                           "diasBP" = df$diasBP,
+                           "year" = df$visit_year,
+                           "race" = df$race,
+                           "age" = df$visit_age,
+                           "weight" = df$weight_kg,
+                           "bmi" = df$bmi,
+                           "pnemounia" = df$pneumonia,
+                           "bronch_atk" = df$bronchitis_attack,
+                           "copd" = df$copd,
+                           "total_lung_cap" = df$total_lung_capacity
+                           )
+
+plot_pairs <- function(dat, yvar) {
+    ncols <- ncol(dat)  # number of variables in dataset
+    # loop through columns to graph scatterplots
+    for (i in 1:ncols) {
+        plot(dat[,i], dat[, yvar], 
+             xlab = names(dat)[i], ylab = yvar, 
+             cex.lab = 2, cex.axis = 2)
+        # add lowess line for non-factor/non-character variables
+        if (!(class(dat[,i]) %in% c('factor', 'character'))) {
+            lines(lowess(dat[,i], dat[, yvar]))
+        }
+    }  # end loop
+}  # end function
+
+#par(mfrow=c(12,3))
+# need to change to df instead of tibble for this function to work
+plot_pairs(as.data.frame(df), yvar = "total_lung_capacity")
+
+# filter df to numeric variables only
+numeric_vars <- select_if(df, is.numeric)
+M <- cor(numeric_vars)
+corrplot(M, method = 'number')
+
+ggpairs(vars_to_plot, aes(color=copd, alpha=0.2))
+```
+
+There are many relationships visualized; we will try to create a linear model to estimate our response variable, ``total_lung_capacity`` using some of the other variables. We write about the relationships below.
+
+From our ``plot_pairs`` function, we see a significant difference between gender (male/female), with males having higher ``total_lung_capacity``, on average. Additionally, African-Americans tend to have lower ``total_lung_capacity`` than their white counterparts do. As ``height_cm`` increases, we see a clear positive linear relationship with ``total_lung_capacity`` with no apparent need to transform. ``weight_kg`` seems to have an interesting relationship with ``total_lung_capacity`` - at first, weight_kg increases ``total_lung_capacity`` on average, but then it seems to decline around 90 kg. Perhaps being overweight decreases ``total_lung_capacity`` - an interesting trend. ``sysBP`` seems to have no real relationship with ``total_lung_capacity``. We see the same lack of a trend with ``diasBP``, as well as ``hr``, ``O2_hours_day``.  We see a slightly negative relationship between ``bmi`` and ``total_lung_capacity`` - it seems like a transformation for ``bmi`` may be appropriate. ``asthma`` does not seem to have a significant impact on ``total_lung_capacity``. ``hay_fever`` does not seem to have a relationship with ``total_lung_capacity``. Similarly, ``bronchitis_attack`` does not seem to be correlated with ``total_lung_capacity``. ``pneumonia`` status does not seem to impact ``total_lung_capacity``. ``chronic_bronchitis``, ``emphysema``, ``copd``, and ``sleep_apnea`` have no significant differences for their factor levels. ``SmokStartAge`` may need a transformation - a higher smoking starting age is correlated with a lower total lung capacity. ``CigPerDaySmokAvg`` has a positive relationship with ``total_lung_capacity`` that may be quadratic or in need of a transformation. ``Duration_Smoking`` has a negative relationship with ``total_lung_capacity`` until above 35, and the trend becomes positive from there. ``smoking_status`` has no significant impact based on group for our response variable. ``pct_emphysema`` is positively correlated with ``total_lung_capacity``, but we see a sharp curve at the start and may need to transform it. ``functional_residual_capacity`` has what can be a quadratic relationship with ``total_lung_capacity``, but it may suffice to transform the variable instead. ``functional_residual_capacity`` has a strong positive relationship with our RV that may be either quadratic or linear after a transformation. ``pct_gastrapping`` has a positive relationship that probably would be useful after a transformation. ``insp_meanatt`` looks like an elbow plot and a transformation may be helpful in a linear model. ``exp_meanatt`` has a negative linear relationship with our RV. For nonmissing values of ``FEV1_FVC_ratio``, we see a negative trend with our RV.
+
+However, our above visualizations are problematic. Since some values for ``total_lung_capacity`` are coded as 0 when they are not actually 0, they are affecting our visualizations. Thus, we remove the rows that contain missing values for ``total_lung_capacity``. We go from having 5747 rows to 4702 as a result of this decision. This mean we scrapped about 16.44% of our data, but we still have thousands of observations to work with, which will be enough to conduct our statistical inference. Going forward, we will NOT be using the 0 values for ``total_lung_capacity`` anymore.
+
+```{r}
+df3 <- df %>% 
+  dplyr::select(-sid, -visit_date) %>% 
+  filter(total_lung_capacity > 0)
+dim(df)
+# see how many rows got removed & check 2 columns got removed
+dim(df3)
+```
+
+```{r, message=F, fig.width=20}
+plot_pairs(as.data.frame(df3), yvar = "total_lung_capacity")
+
+# filter df to numeric variables only
+numeric_vars <- select_if(df3, is.numeric)
+M <- cor(numeric_vars)
+corrplot(M, method = 'number')
+
+# df3_pt1 <- df3 %>% 
+#   dplyr::select(visit_year:bmi, total_lung_capacity)
+# 
+# df3_p2 <- df3 %>% 
+#   dplyr::select(asthma:total_lung_capacity)
+# 
+# df3_p3 <- df3 %>% 
+#   dplyr::select(pct_emphysema:FEV1_phase2, total_lung_capacity)
+# 
+# cols <- RColorBrewer::brewer.pal(3, "BrBG")
+# ggpairs(df3_pt1, aes(alpha = 0.5))
+# ggpairs(df3_p2)
+# ggpairs(df3_p3)
+
+df4 <- df3 %>% 
+  filter(sysBP > 0, diasBP > 0, exp_meanatt < 0, FEV1_FVC_ratio > -1, FEV1 > -1, FVC > 0, functional_residual_capacity > 0)
+```
+
+```{r}
+# potential outliers
+boxplot.stats(df4$total_lung_capacity)$out
+```
+
+
+To save professor Hasenstab time, we will only note interesting features here. There appears to be a ``gender`` effect on ``total_lung_capacity``, so we will probably end up using it in our model. Similarly, a ``race`` effect seems to exist. ``height_cm`` has a strong positive correlation with ``total_lung_capacity``, suggesting it will play an important role in our linear regression model. ``bmi`` has a mostly negative relationship with our RV, but a transformation may improve the linearity of the relationship, which would make it better for our model. A later ``SmokStartAge`` is correlated with a lower ``total_lung_capacity``. The relationship is weak and may be improved via transformations. ``CigPerDaySmokAvg`` has a positive relationship that appears quadratic-ish with our RV. ``pct_emphysema`` has a positive relationship that also looks quadratic with ``total_lung_capacity``. ``functional_residual_capacity`` has a a strong positive relationship with ``total_lung_capacity``. ``pct_gastrapping`` has a similar trend. ``insp_meanatt`` has a strong negative linear relationship with ``total_lung_capacity``. ``exp_meanatt`` has a strong negative linear relationship with ``total_lung_capacity`` for nonmissing values. ``FEV1_FVC_ratio`` has a similar trend. ``FEV1`` has a quadratic trend with our RV. ``FVC`` has a strong positive linear relationship with our RV, but using it with ``FEV1_FVC_ratio`` already in our model would lead to multicollinearity since they're the same variable. Finally ``FEV1_phase2`` has a quadratic relationship as well.
+
+Linear: gender, race, height_cm, bmi (transform?), SmokStartAge (weak!), pct_gastrapping, insp_meanatt, FEV1_FVC_ratio, FVC
+Quadratic: pct_emphysema, CigPerDaySmokAvg, FEV1, FEV1_phase2, 
+
+Transforming ``bmi`` did not help much - we may end up not using it in the model
+
+```{r}
+plot_pairs(as.data.frame(df4), "total_lung_capacity")
+```
+
+```{r, message=F, fig.width=20}
+# plot: https://www.r-bloggers.com/2016/02/multiple-regression-lines-in-ggpairs/
+best_vars <- df4 %>% 
+  dplyr::select(gender, race, height_cm, functional_residual_capacity, FVC, FEV1_FVC_ratio, exp_meanatt, insp_meanatt, CigPerDaySmokAvg, FEV1, FEV1_phase2, log(pct_emphysema), total_lung_capacity)
+
+my_fn <- function(data, mapping, ...){
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_point() + 
+    geom_smooth(method=loess, fill="red", color="red", ...) +
+    geom_smooth(method=lm, fill="blue", color="blue", ...)
+  p
+}
+ggpairs(best_vars, lower = list(continuous = my_fn))
+```
+
+```{r}
+# full model:
+model1 <- lm(total_lung_capacity ~ gender + race + height_cm + functional_residual_capacity + FVC + FEV1_FVC_ratio + exp_meanatt + insp_meanatt + CigPerDaySmokAvg + FEV1_phase2 + I(FEV1_phase2^2) + I(pct_emphysema^2) + FEV1 + I(FEV1^2) + FEV1_phase2 + I(FEV1_phase2^2), data = df4)
+summary(model1)
+plot(model1)
+```
+
+
+Linear: gender, race, height_cm, bmi weak neg (avoid), functional_residual_capacity, FVC, FEV1_FVC_ratio, exp_meanatt, insp_meanatt
+Quadratic: CigPerDaySmokAvg, pct_emphysema (may be better as a log; avoid), FEV1, FEV1_phase2, pct_gastrapping (may need trans; avoid)
+
+```{r}
+preds <- with(df4, cbind(gender, race, height_cm, SmokStartAge, pct_gastrapping, insp_meanatt, FEV1_FVC_ratio, FVC, pct_emphysema, sqrt(pct_emphysema), log(pct_emphysema), bmi, I(bmi^2), CigPerDaySmokAvg, I(CigPerDaySmokAvg^2), FEV1, I(FEV1^2), FEV1_phase2, I(FEV1_phase2^2)))
+
+model <- regsubsets(preds, y = df4$total_lung_capacity,
+                   nbest = 30,    # save the best # for each number of variables
+                   nvmax = 20,    # maximum number of variables allowed in the model
+                   really.big=T)  # for larger datasets
+model_summ <- summary(model)  # store the summary of the best subsets
+
+# plot criteria vs number of variables
+number_variables <- apply(model_summ$which, 1, sum)
+
+# create dataframe of metrics
+criteria <- data.frame(p = number_variables,
+                       rss = model_summ$rss, 
+                       rsq = model_summ$rsq, 
+                       adjr2 = model_summ$adjr2, 
+                       cp = model_summ$cp,
+                       bic = model_summ$bic)
+
+# shows all criteria and included variables ordered by bic
+criteria <- cbind(criteria, model_summ$outmat)
+print(head(criteria[order(criteria$bic),]))
+```
+
+```{r, fig.width=20}
+best_lm <- lm(total_lung_capacity ~ gender + race + height_cm + pct_gastrapping + insp_meanatt + FEV1_FVC_ratio +FVC + FEV1 + I(FEV1^2), data = df4)
+par(mfrow = c(1, 4))
+#plot(best_lm)
+summary(best_lm)
+
+par(mfrow = c(1, 2))
+best_lm2 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FEV1_FVC_ratio + FVC + FEV1 + I(FEV1^2), data = df4)
+plot(best_lm2, which = c(3,4))
+summary(best_lm2)
+
+# dow / outliers removed 
+best_lm3 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FEV1_FVC_ratio + FVC + FEV1 + I(FEV1^2), data = df5)
+#plot(best_lm2, which = c(3,4))
+summary(best_lm3)
+summary(best_lm3)$coefficients[,1]
+```
+
+```{r}
+# SCRAPPED MODEL 
+lm1 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FEV1_FVC_ratio + FVC + FEV1 + I(FEV1^2) + FVC + FEV1 + I(FEV1^2), data = df4)
+plot(lm1)
+# cut FEV1_FVC ratio & add interaction
+lm2 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FVC + FEV1 + I(FEV1^2) + FVC + FEV1 + I(FEV1^2) + FEV1:FVC, data = df4)
+plot(lm2)
+# remove vars - bad!
+lm3 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FVC + FVC, data = df4)
+plot(lm3)
+#
+lm4 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FEV1_FVC_ratio + FVC + FEV1 + I(FEV1^2) + FVC + FEV1 + I(FEV1^2) + SmokStartAge + I(SmokStartAge^2), data = df4)
+plot(lm4)
+#
+lm5 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FEV1_FVC_ratio + FVC + FEV1 + I(FEV1^2) + FVC + FEV1 + I(FEV1^2) + bmi + I(bmi^2) + log(pct_emphysema) + FEV1_phase2 + I(FEV1_phase2), data = df4)
+plot(lm5)
+
+# remove outliers
+outliers <- boxplot.stats(df4$total_lung_capacity)$out
+df5 <- df4 %>% 
+  filter(total_lung_capacity < min(outliers))
+
+lm5 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FEV1_FVC_ratio + FVC + FEV1 + I(FEV1^2) + FVC + FEV1 + I(FEV1^2), data = df5)
+plot(lm5)
+
+#
+lm7 <- lm(total_lung_capacity ~ gender + race + height_cm + insp_meanatt + FEV1_FVC_ratio + FVC + FEV1 + I(FEV1^2) + FVC + FEV1 + I(FEV1^2) + bmi + I(bmi^2) + log(pct_emphysema) + FEV1_phase2 + I(FEV1_phase2), data = df5)
+plot(lm7)
+```
+
+```{r}
+ggplot(mtcars, aes(cyl)) + geom_bar()
+ggplot(mtcars, aes(hp)) + geom_histogram(binwidth = 25)
+grades <- c(55, 60, 65, 70, 72, 73, 75, 75, 76, 80, 82, 84, 84, 84, 86, 87, 87, 90, 92, 93, 94, 95, 96, 98, 98, 98, 99, 100)
+hist(grades)
+ggplot(Davis, aes(height, weight)) + geom_point()
+
+x <- c(0, 1, 2, 3, 4, 5)
+y <- c(10, 12, 15, 17, 19, 20)
+dat <- data.frame(x, y)
+ggplot(dat, aes(x, y)) + geom_point()
+lm(y ~ x, data = dat)
+```
+
