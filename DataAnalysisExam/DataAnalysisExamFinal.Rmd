@@ -1,0 +1,483 @@
+---
+title: "Data Analysis Exam"
+author: "Razmig Zeitounian"
+date: "2022-08-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(RColorBrewer)
+library(corrplot)
+library(betareg)
+library(leaps)
+library(MASS)
+library(FactoMineR)
+library(sandwich)
+library(msm)
+```
+
+```{r Formatting}
+# color palette for data viz
+color_pal <- RColorBrewer::brewer.pal(n = 5, name = "Dark2")
+# change scientific notation to standard form
+options(scipen = 100)
+```
+
+
+```{r Load in Data}
+# change read.csv to read_csv to fix the data reading in issue for dates as columns
+covid <- read_csv("C:/Users/razmi/OneDrive/Desktop/Data Analysis Exam SDSU/SD_Zipcode_COVID_4_DAE_F22_f.csv")
+demographics <- read_csv("C:/Users/razmi/OneDrive/Desktop/Data Analysis Exam SDSU/demographic_SD_ZIP_4_DAE_F22.csv")
+
+# notice: one data set has more rows than the other => some zipcodes are not going to be in both
+# potential issue!
+dim(covid)
+dim(demographics)
+
+# change capitalization to allow for merge
+# https://www.sharpsightlabs.com/blog/rename-columns-in-r/
+covid <- rename(covid, zipcode = Zipcode)
+
+# check for NAs - none in either data set
+# anyNA(covid_total_zip)
+# anyNA(demographics)
+
+# check if any zipcodes got doubled - no duplicates!
+# length(unique(covid_total_zip$zipcode)) == length(covid_total_zip$zipcode)
+# length(unique(demographics$zipcode)) == length(demographics$zipcode)
+
+# get total cases for each zip code
+covid_drop_zip <- covid %>% 
+  dplyr::select(-zipcode)
+covid_total_zip <- covid %>% 
+  rowSums() 
+covid_total_zip <- data.frame(zipcode = covid$zipcode, case_count = covid_total_zip)
+
+# combine datasets
+df <- demographics %>% 
+  left_join(covid_total_zip, by = "zipcode")
+
+# https://stackoverflow.com/questions/2185252/reshaping-data-frame-from-wide-to-long-format
+# change wide to long format for better usage
+covid_total_zip_long <- melt(setDT(covid_total_zip), id.vars = c("zipcode"), variable.name = "Date")
+covid_total_zip_long <- rename(covid_total_zip_long, cases = value)
+# summary(covid_total_zip_long)
+
+# change zipcode to factor
+covid_total_zip_long$zipcode <- as.factor(covid_total_zip_long$zipcode)
+
+# NOTE: CHANGE ROWSUM - THIS IS CUMULATIVE DATA
+```
+
+```{r}
+# redo df into long
+# df_long <- melt(setDT(df), id.vars = c("zipcode"), variable.name = "Date")
+df_long <- reshape2::melt(df, id.vars = 1:18, variable.name = "Date")
+
+# plot case count
+ggplot(df_long, aes(case_count)) +
+  geom_histogram(col = color_pal[1], fill = color_pal[2]) +
+  labs(x = "Number of Cases", y = "Count", title = "Total Number of COVID Cases for Each SD Zip Code from 4/1/2020-6/29/2021")
+
+ggplot(df_long, aes(sqrt(case_count))) +
+  geom_histogram(col = color_pal[3], fill = color_pal[4]) +
+  labs(x = "Number of Cases in Zipcode", y = "Count", title = "sqrt(Total Number of COVID Cases for Each SD Zipcode from 4/1/2020-6/29/2021)")
+```
+
+
+```{r Transformation of y}
+rcompanion::plotNormalHistogram(sqrt(df_long$case_count), col = color_pal[3],
+                                xlab = "Square Root of Cumulative Cases", 
+                                main = "Distribution of Transformed Response Variable")
+                                # ,
+                                # breaks = 30)
+```
+
+
+```{r Model Info & Testing, message=FALSE, fig.width=20, fig.length=20}
+# look only at cumulative cases - last column
+covid_cumulative <- data.frame(zipcode = covid[, 1], cumulative_cases = covid[, ncol(covid)]) %>% 
+  rename(zipcode = zipcode, cumulative_cases = X6.29.2021)
+
+# merge data
+full_df <- demographics %>% 
+  left_join(covid_cumulative, by = "zipcode")
+mod <- lm(sqrt(cumulative_cases) ~ . - zipcode, data = full_df)
+summary(mod)
+plot(mod)
+
+# needed to drop female since it's a function of male - otherwise error
+full_df_no_women <- full_df %>% 
+  dplyr::select(-female)
+
+# look at rv - sqrt was best transformation on y
+rcompanion::plotNormalHistogram(sqrt(full_df_no_women$cumulative_cases))
+
+my_lm <- lm(sqrt(cumulative_cases) ~ . - zipcode, data = full_df_no_women)
+summary(my_lm)
+# check correlations wuth cumulative cases
+cor_x_y <- cor(full_df_no_women[,2:16], full_df_no_women[,17])
+corrplot(cor_x_y)
+
+# view all correlations at once - multicollinearity?
+correlations <- cor(full_df_no_women)
+corrplot(correlations, col=colorRampPalette(c("red","white","green"))(200))
+
+# redo df with rv = sqrt(y) going forward
+full_df_no_women_sqrt_y <- full_df_no_women %>% 
+  mutate(sqrt_cum_cases = sqrt(cumulative_cases)) %>% 
+  dplyr::select(-cumulative_cases)
+
+# pairwise plots to show all corrs
+pairs_df <- full_df_no_women_sqrt_y %>% 
+  dplyr::select(-zipcode)
+GGally::ggpairs(pairs_df) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+predictors_df <- full_df_no_women_sqrt_y %>% 
+  dplyr::select(-sqrt_cum_cases, -zipcode)
+
+# look for multicollinearity in model - drop zipcode since it doesnt help
+df_for_lm <- full_df_no_women_sqrt_y %>% 
+  dplyr::select(-zipcode)
+lmMod <- lm(sqrt_cum_cases ~ . , data = df_for_lm)
+selectedMod <- step(lmMod)
+summary(selectedMod)
+
+# check multicollinearity
+all_vifs <- car::vif(selectedMod)
+print(all_vifs)
+
+signif_all <- names(all_vifs)
+
+# Remove vars with VIF> 4 and re-build model until none of VIFs don't exceed 4.
+while(any(all_vifs > 4)){
+  var_with_max_vif <- names(which(all_vifs == max(all_vifs)))  # get the var with max vif
+  signif_all <- signif_all[!(signif_all) %in% var_with_max_vif]  # remove
+  myForm <- as.formula(paste("sqrt_cum_cases ~ ", paste (signif_all, collapse=" + "), sep=""))  # new formula
+  selectedMod <- lm(myForm, data=df_for_lm)  # re-build model with new formula
+  all_vifs <- car::vif(selectedMod)
+}
+summary(selectedMod)
+# much better!
+car::vif(selectedMod)
+plot(selectedMod)
+summary(selectedMod)
+# but, this has insignficant variables
+
+# so lets redo stuff
+all_vars <- names(selectedMod[[1]])[-1]  # names of all X variables
+# Get the non-significant vars
+summ <- summary(selectedMod)  # model summary
+pvals <- summ[[4]][, 4]  # get all p values
+not_significant <- character()  # init variables that aren't statsitically significant
+not_significant <- names(which(pvals > 0.1))
+not_significant <- not_significant[!not_significant %in% "(Intercept)"]  # remove 'intercept'. Optional!
+
+# If there are any non-significant variables, 
+while(length(not_significant) > 0){
+  all_vars <- all_vars[!all_vars %in% not_significant[1]]
+  myForm <- as.formula(paste("sqrt_cum_cases ~ ", paste (all_vars, collapse=" + "), sep=""))  # new formula
+  selectedMod <- lm(myForm, data=df_for_lm)  # re-build model with new formula
+  
+  # Get the non-significant vars.
+  summ <- summary(selectedMod)
+  pvals <- summ[[4]][, 4]
+  not_significant <- character()
+  not_significant <- names(which(pvals > 0.1))
+  not_significant <- not_significant[!not_significant %in% "(Intercept)"]
+}
+summary(selectedMod)
+# now all are significant!
+
+# view diagnostics - res vs fitted should have no pattern / random errors normally dist, normal qq should be straight for normality assumption to be met, and scale location should be approximately straight. res vs lev can show influential pts that we can removed and rerun the regression w/ later
+# see: https://data.library.virginia.edu/diagnostic-plots/
+par(mfrow = c(1,4))
+plot(selectedMod)
+
+# check point past cooks distance - 6th obs
+df_lm_adj <- df_for_lm[6,]
+```
+
+```{r Model without Influential Pts}
+# plot outliers for rv
+boxplot(df_for_lm$sqrt_cum_cases,
+  ylab = "sqrt_cum_cases",
+  col = color_pal[5],
+  main = "Distribution of sqrt Cumulative Cases"
+)
+# no outliers via boxplot
+
+# check point past cooks distance - 6th obs, from above plot's last output
+df_lm_adj <- df_for_lm[-6,]
+
+lmMod <- lm(sqrt_cum_cases ~ . , data = df_lm_adj)
+selectedMod <- step(lmMod)
+summary(selectedMod)
+
+# check multicollinearity
+all_vifs <- car::vif(selectedMod)
+print(all_vifs)
+
+signif_all <- names(all_vifs)
+
+# Remove vars with VIF> 4 and re-build model until none of VIFs don't exceed 4.
+while(any(all_vifs > 4)){
+  var_with_max_vif <- names(which(all_vifs == max(all_vifs)))  # get the var with max vif
+  signif_all <- signif_all[!(signif_all) %in% var_with_max_vif]  # remove
+  myForm <- as.formula(paste("sqrt_cum_cases ~ ", paste (signif_all, collapse=" + "), sep=""))  # new formula
+  selectedMod <- lm(myForm, data=df_lm_adj)  # re-build model with new formula
+  all_vifs <- car::vif(selectedMod)
+}
+summary(selectedMod)
+# much better!
+car::vif(selectedMod)
+plot(selectedMod)
+summary(selectedMod)
+# but, this has insignficant variables
+
+# so lets redo stuff
+all_vars <- names(selectedMod[[1]])[-1]  # names of all X variables
+# Get the non-significant vars
+summ <- summary(selectedMod)  # model summary
+pvals <- summ[[4]][, 4]  # get all p values
+not_significant <- character()  # init variables that aren't statsitically significant
+not_significant <- names(which(pvals > 0.1))
+not_significant <- not_significant[!not_significant %in% "(Intercept)"]  # remove 'intercept'. Optional!
+
+# If there are any non-significant variables, 
+while(length(not_significant) > 0){
+  all_vars <- all_vars[!all_vars %in% not_significant[1]]
+  myForm <- as.formula(paste("sqrt_cum_cases ~ ", paste (all_vars, collapse=" + "), sep=""))  # new formula
+  selectedMod <- lm(myForm, data=df_lm_adj)  # re-build model with new formula
+  
+  # Get the non-significant vars.
+  summ <- summary(selectedMod)
+  pvals <- summ[[4]][, 4]
+  not_significant <- character()
+  not_significant <- names(which(pvals > 0.1))
+  not_significant <- not_significant[!not_significant %in% "(Intercept)"]
+}
+summary(selectedMod)
+# now all are significant!
+
+# view diagnostics - res vs fitted should have no pattern / random errors normally dist, normal qq should be straight for normality assumption to be met, and scale location should be approximately straight. res vs lev can show influential pts that we can removed and rerun the regression w/ later
+# see: https://data.library.virginia.edu/diagnostic-plots/
+par(mfrow = c(1,4))
+plot(selectedMod)
+```
+
+```{r Quadratic Model}
+# https://datascienceplus.com/fitting-polynomial-regression-r/
+# NEW MODEL
+mod <- lm(sqrt_cum_cases ~ black + I(black^2) + Total_hispanic + I(Total_hispanic^2) + non_hisp_white, data = df_for_lm)
+summary(mod)
+par(mfrow = c(2,2))
+plot(mod)
+
+# see if dropping black squares is worth w/ anova
+drop_black2 <- lm(sqrt_cum_cases ~ black + Total_hispanic + I(Total_hispanic^2) + non_hisp_white, data = df_for_lm)
+anova(drop_black2, mod)
+# just barely insignificant at .05 level => drop the squared term for black
+drop_black2
+plot(drop_black2)
+summary(drop_black2)
+
+# remove influential pts - new model
+df_rm_influential <- df_for_lm[-c(78, 100), ]
+drop_black_inf_rm <- lm(sqrt_cum_cases ~ black + Total_hispanic + I(Total_hispanic^2) + non_hisp_white, data = df_rm_influential)
+plot(drop_black_inf_rm)
+summary(drop_black_inf_rm)
+```
+
+
+----------- lag plot below, from other R file
+
+```{r Libraries, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(RColorBrewer)
+library(corrplot)
+```
+
+```{r Formatting}
+# color palette for data viz
+color_pal <- RColorBrewer::brewer.pal(n = 5, name = "Dark2")
+# change scientific notation to standard form
+options(scipen = 100)
+```
+
+
+```{r Load in Data}
+# change read.csv to read_csv to fix the data reading in issue for dates as columns
+covid <- read_csv("C:/Users/razmi/OneDrive/Desktop/Data Analysis Exam SDSU/SD_Zipcode_COVID_4_DAE_F22_f.csv")
+demographics <- read_csv("C:/Users/razmi/OneDrive/Desktop/Data Analysis Exam SDSU/demographic_SD_ZIP_4_DAE_F22.csv")
+
+# notice: one data set has more rows than the other => some zipcodes are not going to be in both
+# potential issue!
+dim(covid)
+dim(demographics)
+
+# change capitalization to allow for merge
+# https://www.sharpsightlabs.com/blog/rename-columns-in-r/
+covid <- rename(covid, zipcode = Zipcode)
+
+# check for NAs - none in either data set
+# anyNA(covid)
+# anyNA(demographics)
+
+# check if any zipcodes got doubled - no duplicates!
+# length(unique(covid$zipcode)) == length(covid$zipcode)
+# length(unique(demographics$zipcode)) == length(demographics$zipcode)
+
+head(covid)
+head(demographics)
+
+# get total cases for each zip code
+covid_drop_zip <- covid %>% 
+  dplyr::select(-zipcode)
+covid_totals <- covid_drop_zip %>% 
+  rowSums()
+
+# combine datasets
+df <- covid %>% 
+  left_join(demographics)
+
+# https://stackoverflow.com/questions/2185252/reshaping-data-frame-from-wide-to-long-format
+# change wide to long format for better usage
+covid_long <- melt(setDT(covid), id.vars = c("zipcode"), variable.name = "Date")
+covid_long <- rename(covid_long, cases = value)
+# summary(covid_long)
+
+# chaneg zipcode to factor
+covid_long$zipcode <- as.factor(covid_long$zipcode)
+
+# check number of obs per day - note that they are all 113
+# n_per_day <- covid_long %>% 
+#   group_by(Date) %>% 
+#   count()
+# levels(as.factor(n_per_day$n))
+
+covid_long %>% 
+  group_by(zipcode, cases) %>% 
+  count()
+# number of rows is in 113 (# obs per zip) * 452 (# days) form
+
+########################################################################
+# total cases per day, regardless of zipcode, cumulative:
+cases_per_day <- covid_long %>% 
+  group_by(Date) %>% 
+  summarize(count = sum(cases))
+day_count <- 1:length(cases_per_day$Date)
+cases_per_day2 <- cbind(cases_per_day, day_count)
+
+diff(cases_per_day$count)
+########################################################################
+
+# for more readable labels, change dates with day as ID
+# note it was still cluttered with rotated dates
+day_count <- 1:length(cases_per_day$Date)
+cases_per_day2 <- cbind(cases_per_day, day_count)
+
+ggplot(cases_per_day2, aes(day_count, count)) +
+  geom_point(col = color_pal[2]) + 
+  labs(x = "Days since COVID", y = "Total Confirmed Cases", title = "COVID Cases on  a Daily Basis in San Diego County")
+
+###########################################################################
+# check change in cases per day w/ lag
+n <- length(day_count) - 1
+daily_new_cases <- data.frame(new_cases = diff(cases_per_day2$count)) %>% 
+  cbind(day = 1:n)
+
+# plot new cases per day
+ggplot(daily_new_cases, aes(day, new_cases)) +
+  geom_point(col = color_pal[1]) +
+  labs(x = "New Case Count from Previous Day", y = "Number of Cases", title = "Number of New COVID Cases Per Day, from 4/1/2022")
+# and its distribution
+ggplot(daily_new_cases, aes(new_cases)) +
+  geom_histogram(color = color_pal[3], fill = color_pal[4]) +
+  labs(x = "New Cases", y = "Count")
+#########################################################################
+
+# verify above works as expected
+# test <- covid_long %>%
+#   filter(Date == '4/1/2020') 
+# sum(test$cases)
+
+# combine datasets again- dif version w/ 19 columns
+demographics$zipcode <- as.factor(demographics$zipcode)
+df2 <- covid_long %>% 
+  left_join(demographics, by = "zipcode")
+
+# get daily cases again, with new version of df
+daily_case_count <- df2 %>% 
+  group_by(Date) %>% 
+  summarize(daily_cases = sum(cases))
+
+summary(daily_case_count$daily_cases)
+
+```
+
+```{r}
+# redo df into long
+df_long <- melt(setDT(df), id.vars = c("zipcode"), variable.name = "Date")
+# note: this has NAs!
+# anyNA(df_long)
+# length(unique(df$zipcode))
+# 113 zipcodes - demographics has less! redo the join later to not have NAs
+
+# join w/ smaller data set to avoid NAs
+covid$zipcode <- as.factor(covid$zipcode)
+df2 <- demographics %>% 
+  left_join(covid)
+# df2
+# get data to long format
+# df2_long <- melt(setDT(df2), id.vars = c("zipcode"), variable.name = "Total_pop")
+# anyNA(df2_long)
+# melt(setDT(df2), id.vars = c("zipcode"), variable.name = "Date")
+ 
+# # get data to long format
+df2_long <- reshape2::melt(df2, id.vars = 1:17, variable.name = "Date")
+```
+
+```{r}
+# daily case count, regardless of county
+daily_case_count <- df2_long %>% 
+  group_by(Date) %>% 
+  summarize(daily_cases = sum(value))
+
+day_count <- 1:length(daily_case_count$Date)
+cases_per_day2 <- cbind(daily_case_count, day_count)
+
+ggplot(cases_per_day2, aes(day_count, daily_cases)) +
+  geom_point(col = color_pal[2]) + 
+  labs(x = "Days since COVID", y = "Total Confirmed Cases", title = "COVID Cases on  a Daily Basis in San Diego County")
+
+####################################################################
+# calculate new cases since 4/1/2020
+cases_per_day_dif <- diff(cases_per_day2$daily_cases)
+day_count_lag1 <- 1:length(cases_per_day_dif)
+dif_cases_df <- data.frame(new_cases = cases_per_day_dif, day_dif = cases_per_day_dif)
+
+ggplot(dif_cases_df, aes(day_dif, cases_per_day_dif)) +
+  geom_point(col = color_pal[2]) + 
+  labs(x = "Days since COVID", y = "Total Confirmed Cases", title = "COVID Cases on  a Daily Basis in San Diego County")
+
+ggplot(dif_cases_df, aes(cases_per_day_dif)) + 
+  geom_histogram(col = color_pal[4], fill = color_pal[5], binwidth = 100) +
+                 labs(x = "New Cases Compared to Previous Day",
+                      y = "Count",
+                      title = "Difference in Case Counts Relative to Previous Day")
+```
+
+
+
+
